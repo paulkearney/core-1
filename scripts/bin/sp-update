@@ -155,32 +155,47 @@ trap cleanup EXIT
 # Same portability reason sleepypod-biometrics-pruner uses `df -P`.
 declare -A NEED_MB=()
 declare -A NEED_PATH=()
+declare -A NEED_MOUNT=()
 
 require_space() {
-  local path="$1" mb="$2" mp
+  local path="$1" mb="$2" mp fs
   # df needs a path that exists — walk up to the nearest existing ancestor.
   while [ ! -e "$path" ] && [ "$path" != "/" ]; do path=$(dirname "$path"); done
   mp=$(df -Pk "$path" | awk 'NR==2{print $6}')
   mp=${mp:-$path}
-  # Keyed by mount point so paths sharing a filesystem sum instead of racing.
-  NEED_MB["$mp"]=$(( ${NEED_MB["$mp"]:-0} + mb ))
-  NEED_PATH["$mp"]="${NEED_PATH["$mp"]:-$path}"
+  # Bind mounts have different mount points but consume the same free space.
+  # st_dev identifies the backing filesystem (GNU and busybox stat support -c).
+  fs=$(stat -L -c %d "$path")
+  NEED_MB["$fs"]=$(( ${NEED_MB["$fs"]:-0} + mb ))
+  NEED_PATH["$fs"]="${NEED_PATH["$fs"]:-$path}"
+  NEED_MOUNT["$fs"]="${NEED_MOUNT["$fs"]:-$mp}"
 }
 
 require_space "$INSTALL_DIR" 500            # source tree + .next
-require_space "${TMPDIR:-/tmp}" 700         # WORK_DIR and BACKUP_DIR coexist
+# Rollback always uses /tmp; mktemp uses TMPDIR when set. Both copies coexist.
+require_space /tmp 350                     # BACKUP_DIR
+require_space "${TMPDIR:-/tmp}" 350         # WORK_DIR
 require_space /opt/sleepypod 300            # module venvs + uv cache
-# node_modules (~700 MB) lands on /persistent once relocated, rootfs before.
-if mountpoint -q /persistent 2>/dev/null; then
-  require_space /persistent/sleepypod-core 900
-else
+# Use the same target selection as relocation, including small /persistent
+# partitions and NODE_MODULES_DIR overrides. The install path's current bind
+# mount may be removed by relocation, so budget its parent when rootfs wins.
+node_modules_target="$INSTALL_DIR/node_modules"
+if [ -f "$INSTALL_DIR/scripts/lib/relocation-helpers" ]; then
+  source "$INSTALL_DIR/scripts/lib/relocation-helpers"
+  node_modules_target="${NODE_MODULES_DIR:-$(_auto_pick_node_modules_target "$INSTALL_DIR/node_modules")}"
+fi
+if [ "$node_modules_target" = "$INSTALL_DIR/node_modules" ] && \
+   [ -f "$INSTALL_DIR/scripts/lib/relocation-helpers" ]; then
   require_space "$INSTALL_DIR" 900
+else
+  require_space "$node_modules_target" 900
 fi
 
 DISK_SHORT=false
-for mp in "${!NEED_MB[@]}"; do
-  need_mb=${NEED_MB["$mp"]}
-  avail_kb=$(df -Pk "${NEED_PATH["$mp"]}" | awk 'NR==2{print $4}')
+for fs in "${!NEED_MB[@]}"; do
+  mp=${NEED_MOUNT["$fs"]}
+  need_mb=${NEED_MB["$fs"]}
+  avail_kb=$(df -Pk "${NEED_PATH["$fs"]}" | awk 'NR==2{print $4}')
   avail_mb=$(( ${avail_kb:-0} / 1024 ))
   if [ "$avail_mb" -lt "$need_mb" ]; then
     echo "Error: $mp needs ${need_mb}MB free, only ${avail_mb}MB available" >&2
