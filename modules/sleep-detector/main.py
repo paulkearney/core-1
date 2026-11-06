@@ -149,6 +149,18 @@ CAPSENSE2_PRESENCE_THRESHOLD = 6.0
 EXIT_COLLAPSE_FRACTION = 0.25
 EXIT_SETTLE_S = 10 * 60
 OCCUPIED_LOAD_TAU_S = 5 * 60
+# Exit to a new empty level, capSense (Pod 3/4). Bedding pushed onto one
+# channel when the sleeper gets up (pod I14 2026-11-04/05: "in" +546, "out"
+# and "cen" slightly under baseline) reads as a rise above the exit
+# threshold with no one in bed, until the MAX_SESSION_S cap. A body is never
+# still at the raw-unit level: across that pod's recorded nights every
+# 30-minute window moved some channel by at least 43 units (median 500-900),
+# while the made-up empty bed moved 3-6. An occupied reading whose every
+# channel stays within PLATEAU_MAX_RANGE for PLATEAU_SETTLE_S of observed
+# time is an empty bed: the baseline is reseeded to it and the exit dated
+# where the plateau began.
+PLATEAU_MAX_RANGE = 20.0
+PLATEAU_SETTLE_S = 30 * 60
 # In-progress session state survives restarts/reboots via this file. Without
 # it a reboot or service restart mid-session silently dropped the whole night.
 STATE_PATH = Path(os.environ.get(
@@ -594,7 +606,8 @@ class AdaptiveBaseline:
       BASELINE_DOWN_TAU_S — a body only adds capacitance.
     - Exit to a new empty level: an occupied rise that collapses below
       EXIT_COLLAPSE_FRACTION of the occupied load for EXIT_SETTLE_S reseeds
-      the baseline (see observe_load).
+      the baseline (see observe_load). capSense: an occupied reading that
+      stays flat for PLATEAU_SETTLE_S does the same (see observe_plateau).
     - Seeding: saved state, else the calibration profile (including a manual
       recalibration, adopted whenever a newer one appears), else the first
       sample.
@@ -633,6 +646,13 @@ class AdaptiveBaseline:
         self._load_avg: Optional[float] = None
         self._load_obs_s = 0.0
         self._load_last_ts: Optional[float] = None
+        # Flat occupied plateau (observe_plateau). Not persisted: a restart
+        # mid-plateau only restarts the PLATEAU_SETTLE_S wait.
+        self._plateau_since: Optional[float] = None
+        self._plateau_lo: Optional[dict] = None
+        self._plateau_hi: Optional[dict] = None
+        self._plateau_dwell_s = 0.0
+        self._plateau_last_ts: Optional[float] = None
 
     @property
     def exit_threshold(self) -> float:
@@ -788,6 +808,44 @@ class AdaptiveBaseline:
         self.reseed(values, "exit-rebase")
         return since
 
+    def _reset_plateau(self) -> None:
+        self._plateau_since = self._plateau_last_ts = None
+        self._plateau_lo = self._plateau_hi = None
+        self._plateau_dwell_s = 0.0
+
+    def observe_plateau(self, ts: float, values: dict, occupied: bool) -> Optional[float]:
+        """Detect an empty bed held "occupied" by a still load (capSense only).
+        Called once per usable sample before the presence decision;
+        `occupied` is the side's level latch.
+
+        Returns the ts the plateau began when the baseline was just reseeded
+        to this reading (the exit time), else None."""
+        if self.fmt != "capSense":
+            return None
+        if not occupied or self.deviation(values) <= self.exit_threshold:
+            self._reset_plateau()
+            return None
+        if self._plateau_since is not None:
+            lo = {ch: min(self._plateau_lo[ch], v) for ch, v in values.items()}
+            hi = {ch: max(self._plateau_hi[ch], v) for ch, v in values.items()}
+            if any(hi[ch] - lo[ch] > PLATEAU_MAX_RANGE for ch in values):
+                self._reset_plateau()
+        if self._plateau_since is None:
+            self._plateau_since = self._plateau_last_ts = ts
+            self._plateau_lo, self._plateau_hi = dict(values), dict(values)
+            return None
+        # Only observed time counts, so a gap or restart can't confirm a
+        # plateau it didn't see.
+        dt = max(0.0, min(ts - self._plateau_last_ts, BASELINE_MAX_STEP_S))
+        self._plateau_last_ts = ts
+        self._plateau_lo, self._plateau_hi = lo, hi
+        self._plateau_dwell_s += dt
+        if self._plateau_dwell_s < PLATEAU_SETTLE_S:
+            return None
+        since = self._plateau_since
+        self.reseed(values, "plateau-rebase")
+        return since
+
     def track(self, ts: float, values: dict, occupied: bool) -> None:
         """Follow the empty-bed level. Called once per sample after the
         presence decision; `occupied` is the committed (debounced) state."""
@@ -818,6 +876,7 @@ class AdaptiveBaseline:
         self.collapse_dwell_s = 0.0
         self._load_avg = self._load_last_ts = None
         self._load_obs_s = 0.0
+        self._reset_plateau()
 
     def to_params(self) -> dict:
         """Calibration-profile params (the shape the calibrators write)."""
@@ -1286,6 +1345,14 @@ class SessionTracker:
                             "presence baseline rebased to the empty bed's new level",
                             self.side, datetime.fromtimestamp(exit_at, tz=timezone.utc).isoformat(),
                             EXIT_COLLAPSE_FRACTION * 100, EXIT_SETTLE_S // 60)
+            else:
+                exit_at = baseline.observe_plateau(ts, values, self._level_present)
+                if exit_at is not None:
+                    log.warning("%s: occupied reading held within %.0f units on every channel since %s "
+                                "for %d min — presence baseline rebased to the empty bed's new level",
+                                self.side, PLATEAU_MAX_RANGE,
+                                datetime.fromtimestamp(exit_at, tz=timezone.utc).isoformat(),
+                                PLATEAU_SETTLE_S // 60)
             present = baseline.is_present(values, self._level_present)
             self._level_present = present
             if present:

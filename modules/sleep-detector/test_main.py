@@ -673,10 +673,21 @@ def _live_tracker(cal=None):
                                pump_gate=main.PumpGateCapSense())
 
 
+def _sway(ts, rise):
+    """A sleeper is never still at the raw-unit level (see main.PLATEAU_MAX_RANGE):
+    loads over the exit threshold (summed) shift by ±15 per channel each
+    minute — a 30-unit range, past PLATEAU_MAX_RANGE, that keeps a +80 load
+    under the enter threshold and a +70 load over the exit one. Empty and
+    drift-level loads stay flat."""
+    if rise * 3 <= main.CAPSENSE_PRESENCE_THRESHOLD * main.PRESENCE_EXIT_FRACTION:
+        return rise
+    return rise + (15 if int(ts // 60) % 2 else -15)
+
+
 def _run(t, start, seconds, rise, step=5.0):
     ts = start
     while ts < start + seconds:
-        t.process(ts, _cap(rise))
+        t.process(ts, _cap(_sway(ts, rise)))
         ts += step
     return ts
 
@@ -751,7 +762,8 @@ class TestAdaptiveBaseline:
         assert len(rows) == 1
         assert rows[0][3] == 1
 
-    def test_object_left_on_bed_resets_after_capped_session(self):
+    def test_moving_load_that_never_leaves_resets_after_capped_session(self):
+        # The cap stays the backstop for a load that never settles flat.
         t = _live_tracker()
         ts = _run(t, self.T0, 600, 0)
         ts = _run(t, ts, main.MAX_SESSION_S + 3600, 400, step=30.0)
@@ -759,7 +771,66 @@ class TestAdaptiveBaseline:
         assert len(rows) == 1
         assert rows[0][2] == main.MAX_SESSION_S
         assert t.baseline.source == "cap-reset"
-        assert t._session_start is None             # object is the new empty
+        assert t._session_start is None             # the load is the new empty
+
+    def test_still_object_on_bed_is_rebased_without_a_session(self):
+        t = _live_tracker()
+        ts = _run(t, self.T0, 600, 0)
+        end = ts + main.PLATEAU_SETTLE_S + 600
+        while ts < end:
+            t.process(ts, _cap(400))                # flat: no sway
+            ts += 5.0
+        assert t.baseline.source == "plateau-rebase"
+        assert t._session_start is None
+        assert _rows_full(t) == []                  # dated at the plateau start: too short to keep
+        assert abs(t.baseline.means["in"] - (EMPTY["in"] + 400)) < 1
+
+    def test_bedding_pushed_onto_one_channel_closes_at_the_exit(self):
+        # Pod I14 2026-11-04: covers pushed to the middle on getting up put
+        # "in" +546 with "out"/"cen" just under baseline, flat all day.
+        t = _live_tracker()
+        ts = _run(t, self.T0, 600, 0)
+        entered = ts
+        ts = _run(t, ts, 8 * 3600, 600)             # asleep
+        exit_ts = ts
+        bedding = {"out": EMPTY["out"] - 64, "cen": EMPTY["cen"] - 96, "in": EMPTY["in"] + 546}
+        end = ts + 12 * 3600
+        while ts < end:
+            t.process(ts, {"type": "capSense", "left": dict(bedding)})
+            ts += 5.0
+        rows = _rows_full(t)
+        assert len(rows) == 1
+        assert abs(rows[0][0] - entered) <= 10
+        assert abs(rows[0][1] - exit_ts) <= 60       # the real exit, not the 16 h cap
+        assert t.baseline.source == "plateau-rebase"
+        assert t._session_start is None
+        # Covers spread again at bedtime: the inner channel drops below the
+        # bedding level and the baseline follows it down; the night records.
+        ts = _run(t, ts, 1800, 0)
+        ts = _run(t, ts, 8 * 3600, 600)
+        ts = _run(t, ts, 600, 0)
+        rows = _rows_full(t)
+        assert len(rows) == 2
+        assert rows[1][2] >= 8 * 3600 - 60
+
+    def test_plateau_counts_only_observed_time(self):
+        # Sparse samples (a sensor gap) add at most BASELINE_MAX_STEP_S each,
+        # so a flat stretch the detector barely saw can't rebase it.
+        t = _live_tracker()
+        ts = _run(t, self.T0, 600, 0)
+        ts = _run(t, ts, 1800, 600)                 # asleep
+        end = ts + 2 * main.PLATEAU_SETTLE_S
+        while ts < end:
+            t.process(ts, _cap(600))
+            ts += 60.0
+        assert t.baseline.source != "plateau-rebase"
+        assert t._session_start is not None
+
+    def test_plateau_rule_is_capsense_only(self):
+        b = main.AdaptiveBaseline("capSense2", {"A": 1.0, "B": 1.0, "C": 1.0}, 6.0, ref_mean=1.16)
+        values = {"A": 5.0, "B": 5.0, "C": 5.0}
+        for i in range(int(main.PLATEAU_SETTLE_S / 5) + 10):
+            assert b.observe_plateau(self.T0 + i * 5.0, values, occupied=True) is None
 
     def test_manual_recalibration_is_adopted(self):
         cal = _Cal()
@@ -878,15 +949,15 @@ class TestSingleSleeper:
         return mk("left"), mk("right")
 
     @staticmethod
-    def _frame(left_rise, right_rise):
+    def _frame(left_rise, right_rise, ts=0.0):
         return {"type": "capSense",
-                "left": {ch: int(v + left_rise) for ch, v in EMPTY.items()},
-                "right": {ch: int(v + right_rise) for ch, v in EMPTY.items()}}
+                "left": {ch: int(v + _sway(ts, left_rise)) for ch, v in EMPTY.items()},
+                "right": {ch: int(v + _sway(ts, right_rise)) for ch, v in EMPTY.items()}}
 
     def _run(self, left, right, start, seconds, lr, rr, merged=True):
         ts = start
         while ts < start + seconds:
-            frame = self._frame(lr, rr)
+            frame = self._frame(lr, rr, ts)
             if merged:
                 main.process_single_sleeper(left, right, ts, frame)
             else:
