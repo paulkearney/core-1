@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseExpression } from 'cron-parser'
-import { ALARM_HOLD_AFTER_MIN, ALARM_WARMUP_MIN, alarmTemperatureTargets, alarmWarmupMinutes, recurringTarget, sessionTarget, type WeeklyTarget, type RecurringOccurrenceCache } from '../baseline'
+import { ALARM_HOLD_AFTER_MIN, ALARM_WARMUP_MIN, alarmTemperatureTargets, alarmWarmupMinutes, recurringTarget, scheduledSessionEnd, sessionTarget, type WeeklyTarget, type RecurringOccurrenceCache } from '../baseline'
 
 describe('current recurring target', () => {
   const rows: WeeklyTarget[] = [
@@ -190,5 +190,38 @@ describe('alarmWarmupMinutes', () => {
     expect(alarmWarmupMinutes(0)).toBe(30)
     expect(alarmWarmupMinutes(30)).toBe(30)
     expect(alarmWarmupMinutes(45)).toBe(45)
+  })
+})
+
+describe('scheduled power window', () => {
+  const tz = 'America/Denver'
+  const nightly = (['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const)
+    .map(dayOfWeek => ({ dayOfWeek, onTime: '20:15', offTime: '07:30', endAction: 'turn_off' as const }))
+
+  it('spans midnight to the off time the morning after the on time', () => {
+    // 2026-11-12 04:15 MST, when the firmware's default timer expired last night.
+    expect(scheduledSessionEnd(nightly, tz, Date.parse('2026-11-12T11:15Z'))).toBe(Date.parse('2026-11-12T14:30Z'))
+    expect(scheduledSessionEnd(nightly, tz, Date.parse('2026-11-12T03:15Z'))).toBe(Date.parse('2026-11-12T14:30Z'))
+  })
+
+  it('is closed between the off time and the next on time', () => {
+    expect(scheduledSessionEnd(nightly, tz, Date.parse('2026-11-12T14:30Z'))).toBeNull()
+    expect(scheduledSessionEnd(nightly, tz, Date.parse('2026-11-12T20:00Z'))).toBeNull()
+    expect(scheduledSessionEnd([], tz, Date.parse('2026-11-12T11:15Z'))).toBeNull()
+  })
+
+  it('only follows the row for the day the session started', () => {
+    const wednesday = nightly.filter(r => r.dayOfWeek === 'wednesday')
+    expect(scheduledSessionEnd(wednesday, tz, Date.parse('2026-11-12T11:15Z'))).toBe(Date.parse('2026-11-12T14:30Z'))
+    // Thursday night has no row.
+    expect(scheduledSessionEnd(wednesday, tz, Date.parse('2026-11-13T05:00Z'))).toBeNull()
+  })
+
+  it('handles a same-day window and a maintain row', () => {
+    const nap = [{ dayOfWeek: 'thursday' as const, onTime: '13:00', offTime: '15:00', endAction: 'turn_off' as const }]
+    expect(scheduledSessionEnd(nap, tz, Date.parse('2026-11-12T21:00Z'))).toBe(Date.parse('2026-11-12T22:00Z'))
+    expect(scheduledSessionEnd(nap, tz, Date.parse('2026-11-12T22:00Z'))).toBeNull()
+    const maintain = nightly.map(r => ({ ...r, endAction: 'maintain' as const }))
+    expect(scheduledSessionEnd(maintain, tz, Date.parse('2026-11-12T20:00Z'))).toBe(Infinity)
   })
 })

@@ -8,6 +8,14 @@ export class TemperatureBlockedError extends Error {
 }
 
 export const DEFAULT_HOLD_MS = 30 * 60_000
+/**
+ * How often an open-ended target is re-sent during a scheduled power window.
+ * Firmware stops regulating DEFAULT_HEATING_DURATION (8 h) after the last
+ * write, so a flat all-night schedule (one power-on, no curve points) went
+ * neutral hours before its off time. Re-sending well inside that keeps the
+ * timer alive; the window's power-off job still ends the session.
+ */
+export const SESSION_REFRESH_MS = 60 * 60_000
 export const MAX_HOLD_MS = 24 * 60 * 60_000
 
 export type TemperatureSource = 'manual' | 'run-once' | 'autopilot' | 'schedule'
@@ -44,6 +52,8 @@ export interface TemperatureControllerDeps {
   isPowered: (side: Side) => boolean
   readCurrentTarget: (side: Side) => number | null
   readHardwareDeadline: (side: Side) => number | null
+  /** End of the scheduled power window containing `now` (Infinity when it maintains), else null. */
+  readSessionEnd?: (side: Side, now: number) => number | null
   writeHardwareDeadline: (side: Side, deadline: number | null) => void
   isBlocked: (side: Side) => boolean
   /** Must connect before returning; selection and safety are rechecked afterward. */
@@ -91,6 +101,9 @@ export class TemperatureController {
   private applied: Record<Side, number | null> = { left: null, right: null }
 
   private appliedDeadline: Record<Side, number | null> = { left: null, right: null }
+
+  /** When the current target last reached the hardware (epoch ms). */
+  private appliedAt: Record<Side, number | null> = { left: null, right: null }
 
   private published: Partial<Record<Side, string>> = {}
 
@@ -162,6 +175,7 @@ export class TemperatureController {
       this.deps.writeHardwareDeadline(side, durationSec === undefined ? null : now + durationSec * 1_000)
       await this.deps.apply(side, temperature, durationSec)
       this.applied[side] = temperature
+      this.appliedAt[side] = this.deps.now()
       this.appliedDeadline[side] = this.deps.readHardwareDeadline(side)
       this.poweredOff[side] = false
     }
@@ -218,6 +232,7 @@ export class TemperatureController {
       throw error
     }
     this.applied[side] = temperature
+    this.appliedAt[side] = this.deps.now()
     this.appliedDeadline[side] = this.hardwareDeadline(side, selected)
     this.poweredOff[side] = false
     const status = this.status(side)
@@ -289,7 +304,20 @@ export class TemperatureController {
   /** Call after power-off, safety cutoff, or an independently observed target change. */
   invalidate(side: Side): void {
     this.applied[side] = null
+    this.appliedAt[side] = null
     this.appliedDeadline[side] = null
+  }
+
+  /**
+   * An unchanged open-ended target inside a scheduled power window is re-sent
+   * before the firmware's own timer can end the session early.
+   */
+  private needsSessionRefresh(side: Side, selected: TemperatureRequest, now: number): boolean {
+    const appliedAt = this.appliedAt[side]
+    if (appliedAt === null || now - appliedAt < SESSION_REFRESH_MS) return false
+    if (this.remainingDuration(side, selected) !== undefined) return false
+    const end = this.deps.readSessionEnd?.(side, now) ?? null
+    return end !== null && now < end
   }
 
   /** Guard recovery owns the bounded hardware duration; it resolves only the target here. */
@@ -301,6 +329,7 @@ export class TemperatureController {
   recoveredLocked(side: Side, temperature: number): void {
     this.poweredOff[side] = false
     this.applied[side] = temperature
+    this.appliedAt[side] = this.deps.now()
     this.appliedDeadline[side] = this.hardwareDeadline(side, this.select(side, this.deps.now()))
   }
 
@@ -356,6 +385,7 @@ export class TemperatureController {
         if (duration === undefined) await this.deps.apply(side, target)
         else await this.deps.apply(side, target, duration)
         this.applied[side] = target
+        this.appliedAt[side] = this.deps.now()
         this.appliedDeadline[side] = this.hardwareDeadline(side, selected)
       }
       const status = this.status(side)
@@ -364,7 +394,8 @@ export class TemperatureController {
     }
     if (selected && !this.deps.isBlocked(side) && this.isPowered(side)
       && (force || selected.temperature !== this.applied[side]
-        || this.hardwareDeadline(side, selected) !== this.appliedDeadline[side])) {
+        || this.hardwareDeadline(side, selected) !== this.appliedDeadline[side]
+        || this.needsSessionRefresh(side, selected, now))) {
       await this.deps.connect()
       // Connecting can wait for transport recovery. Do not issue an expired
       // request or undo a guard trip that happened while connecting.
@@ -378,6 +409,7 @@ export class TemperatureController {
         if (duration === undefined) await this.deps.apply(side, selected.temperature)
         else await this.deps.apply(side, selected.temperature, duration)
         this.applied[side] = selected.temperature
+        this.appliedAt[side] = this.deps.now()
         this.appliedDeadline[side] = this.hardwareDeadline(side, selected)
       }
     }

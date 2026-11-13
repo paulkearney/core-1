@@ -24,6 +24,7 @@ import { GestureActionHandler } from './gestureActionHandler'
 import { GestureDispatcher, tapGestureEvent } from './gestureDispatch'
 import { defaultGestureActionDeps } from './gestureActionHandler.deps'
 import { DeviceStateSync, getAlarmState } from './deviceStateSync'
+import { presentSideStatus } from './endedSession'
 import { trackPrimingState, resetPrimingState, getPrimeCompletedAt } from './primeNotification'
 import { getAllPumpStallNotices } from './pumpStallNotification'
 import { getSnoozeStatus, suspendSnoozes } from './snoozeManager'
@@ -124,8 +125,8 @@ export const getDacMonitor = async (): Promise<DacMonitor> => {
             ts: Date.now(),
             // A poll can still report the pre-command target right after a
             // mutation; keep the mutation's target until the firmware agrees.
-            leftSide: { ...applyMutationOverlay('left', { ...status.leftSide }), isAlarmVibrating: alarmState.left },
-            rightSide: { ...applyMutationOverlay('right', { ...status.rightSide }), isAlarmVibrating: alarmState.right },
+            leftSide: { ...applyMutationOverlay('left', presentSideStatus('left', { ...status.leftSide })), isAlarmVibrating: alarmState.left },
+            rightSide: { ...applyMutationOverlay('right', presentSideStatus('right', { ...status.rightSide })), isAlarmVibrating: alarmState.right },
             waterLevel: status.waterLevel,
             isPriming: status.isPriming,
             ...(primeCompletedAt && { primeCompletedNotification: { timestamp: primeCompletedAt } }),

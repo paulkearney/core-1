@@ -18,6 +18,7 @@ import { getPrimeCompletedAt } from '@/src/hardware/primeNotification'
 import { getAllPumpStallNotices } from '@/src/hardware/pumpStallNotification'
 import { getAlarmState } from '@/src/hardware/deviceStateSync'
 import { getSnoozeStatus } from '@/src/hardware/snoozeManager'
+import { presentSideStatus } from '@/src/hardware/endedSession'
 import { applyMutationOverlay, recordMutationOverlay } from './mutationOverlay'
 
 export function broadcastMutationStatus(
@@ -34,8 +35,8 @@ export function broadcastMutationStatus(
     const primeCompletedAt = getPrimeCompletedAt()
     const alarmState = getAlarmState()
     const stallNotices = getAllPumpStallNotices()
-    const leftSide = { ...applyMutationOverlay('left', { ...lastStatus.leftSide }), isAlarmVibrating: alarmState.left }
-    const rightSide = { ...applyMutationOverlay('right', { ...lastStatus.rightSide }), isAlarmVibrating: alarmState.right }
+    const leftSide = { ...applyMutationOverlay('left', presentSideStatus('left', { ...lastStatus.leftSide })), isAlarmVibrating: alarmState.left }
+    const rightSide = { ...applyMutationOverlay('right', presentSideStatus('right', { ...lastStatus.rightSide })), isAlarmVibrating: alarmState.right }
 
     if (side && sideOverlay) {
       if (side === 'left') Object.assign(leftSide, sideOverlay)

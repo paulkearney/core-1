@@ -10,7 +10,7 @@ import { withSideLock } from '@/src/hardware/sideLock'
 import { fahrenheitToLevel, MAX_TEMP, MIN_TEMP, type Side } from '@/src/hardware/types'
 import { activeSleeperSides, scheduleSourceSide, type BedConfiguration } from '@/src/lib/singleSleeper'
 import { broadcastMutationStatus } from '@/src/streaming/broadcastMutationStatus'
-import { alarmTemperatureTargets, recurringTarget, sessionTarget, type AlarmOccurrenceCache, type RecurringOccurrenceCache, type WeeklyTarget } from './baseline'
+import { alarmTemperatureTargets, recurringTarget, scheduledSessionEnd, sessionTarget, type AlarmOccurrenceCache, type PowerWindowRow, type RecurringOccurrenceCache, type WeeklyTarget } from './baseline'
 import { TemperatureController, type TemperatureRequest } from './controller'
 
 const invalidSessions: Record<Side, Map<number, string>> = { left: new Map(), right: new Map() }
@@ -107,6 +107,17 @@ function readBaseline(side: Side, now: number): TemperatureRequest[] {
   return requests
 }
 
+/** The scheduled power window `side` is in, following the same schedule owner as its baseline. */
+function readSessionEnd(side: Side, now: number): number | null {
+  const settings = statement('select timezone, bed_mode as bedMode, unused_zone_mode as unusedZoneMode from device_settings').get() as ({ timezone: string | null } & BedConfiguration) | undefined
+  const away = Object.fromEntries((statement('select side, away_mode as awayMode from side_settings').all() as { side: Side, awayMode: number }[])
+    .map(r => [r.side, { awayMode: r.awayMode }]))
+  const source = scheduleSourceSide(side, { ...away, ...settings })
+  if (!source) return null
+  const rows = statement('select day_of_week as dayOfWeek, on_time as onTime, off_time as offTime, end_action as endAction from power_schedules where side = ? and enabled = 1').all(source) as PowerWindowRow[]
+  return scheduledSessionEnd(rows, settings?.timezone || 'America/Los_Angeles', now)
+}
+
 const globalState = globalThis as typeof globalThis & {
   __sp_temperatureController?: TemperatureController
   __sp_temperatureService?: {
@@ -139,6 +150,7 @@ export function getTemperatureController(): TemperatureController {
         db.insert(temperatureHolds).values(values).onConflictDoUpdate({ target: temperatureHolds.side, set: values }).run()
       },
       readBaseline,
+      readSessionEnd,
       // A device_state row left over from before a restart is not evidence of
       // a live session until the firmware has reported in. Gating here covers
       // every reconcile path (the automation engine's startup tick, scheduler

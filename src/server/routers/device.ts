@@ -13,6 +13,7 @@ import type { Side } from '@/src/hardware/types'
 import { getSharedHardwareClient } from '@/src/hardware/sharedClient'
 import { markSideMutated } from '@/src/hardware/deviceStateSync'
 import { getLastSideMutationAt } from '@/src/hardware/sideMutations'
+import { presentSideStatus } from '@/src/hardware/endedSession'
 import { withSideLock } from '@/src/hardware/sideLock'
 import { getTemperatureController, getTemperatureControlStatus } from '@/src/temperature/instance'
 import { getJobManager } from '@/src/scheduler'
@@ -243,19 +244,21 @@ export const deviceRouter = router({
       }
       catch { /* Wi-Fi diagnostics must not prevent hardware status reads. */ }
       const { roomClimate, waterLevelRaw } = await getDeviceEnrichment()
+      const leftSide = presentSideStatus('left', status.leftSide)
+      const rightSide = presentSideStatus('right', status.rightSide)
 
       return {
         ...status,
         temperatureControl: getTemperatureControlStatus(),
         leftSide: {
-          ...status.leftSide,
-          currentTemperature: convertTemp(status.leftSide.currentTemperature),
-          targetTemperature: convertTemp(status.leftSide.targetTemperature),
+          ...leftSide,
+          currentTemperature: convertTemp(leftSide.currentTemperature),
+          targetTemperature: convertTemp(leftSide.targetTemperature),
         },
         rightSide: {
-          ...status.rightSide,
-          currentTemperature: convertTemp(status.rightSide.currentTemperature),
-          targetTemperature: convertTemp(status.rightSide.targetTemperature),
+          ...rightSide,
+          currentTemperature: convertTemp(rightSide.currentTemperature),
+          targetTemperature: convertTemp(rightSide.targetTemperature),
         },
         ...(primeCompletedAt && { primeCompletedNotification: { timestamp: primeCompletedAt } }),
         ...((stallNotices.left || stallNotices.right) && { pumpStallNotifications: stallNotices }),

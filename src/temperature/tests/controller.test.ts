@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { withSideLock } from '@/src/hardware/sideLock'
 import type { Side } from '@/src/hardware/types'
-import { DEFAULT_HOLD_MS, TemperatureController, selectTemperatureRequest } from '../controller'
+import { DEFAULT_HOLD_MS, SESSION_REFRESH_MS, TemperatureController, selectTemperatureRequest } from '../controller'
 import type { TemperatureControllerDeps, TemperatureRequest, TemperatureSource } from '../controller'
 
 function request(source: TemperatureSource, temperature: number, overrides: Partial<TemperatureRequest> = {}): TemperatureRequest {
@@ -332,5 +332,67 @@ describe('temperature arbitration', () => {
     await withSideLock('left', () => h.controller.powerOnLocked('left'))
     expect(h.apply).toHaveBeenCalledExactlyOnceWith('left', 72)
     expect(h.controller.status('left').blocked).toBeNull()
+  })
+})
+
+describe('scheduled power window keeps the firmware timer alive', () => {
+  // Regression: a flat all-night schedule (power on 20:15 at 88°F, off 07:30,
+  // no curve points) wrote the target once; the firmware's 8 h default timer
+  // ended regulation at 04:15 and nothing re-sent it.
+  function windowHarness(sessionEnd: number | null) {
+    const h = harness()
+    h.deps.readSessionEnd = () => sessionEnd
+    return { ...h, controller: new TemperatureController(h.deps) }
+  }
+
+  it('re-sends an unchanged target once the refresh interval passes inside the window', async () => {
+    const h = windowHarness(Number.MAX_SAFE_INTEGER)
+    await h.controller.powerOnLocked('left')
+    expect(h.apply).toHaveBeenCalledTimes(1)
+    h.advance(SESSION_REFRESH_MS - 1)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenCalledTimes(1)
+    h.advance(1)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenCalledTimes(2)
+    expect(h.apply).toHaveBeenLastCalledWith('left', 72)
+    // The refresh restarts the interval rather than writing every tick.
+    h.advance(1_000)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves the firmware timer alone outside a scheduled window', async () => {
+    const h = windowHarness(null)
+    await h.controller.powerOnLocked('left')
+    h.advance(SESSION_REFRESH_MS * 9)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops refreshing once the window has ended', async () => {
+    const h = windowHarness(1_000 + SESSION_REFRESH_MS / 2)
+    await h.controller.powerOnLocked('left')
+    h.advance(SESSION_REFRESH_MS)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not refresh a side that is off', async () => {
+    const h = windowHarness(Number.MAX_SAFE_INTEGER)
+    await h.controller.powerOnLocked('left')
+    h.powered.left = false
+    h.advance(SESSION_REFRESH_MS)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not extend an explicitly bounded hardware session', async () => {
+    const h = windowHarness(Number.MAX_SAFE_INTEGER)
+    await h.controller.setManual('left', 75, DEFAULT_HOLD_MS * 8, 4 * 3600)
+    expect(h.apply).toHaveBeenCalledTimes(1)
+    h.advance(SESSION_REFRESH_MS)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenCalledTimes(1)
   })
 })

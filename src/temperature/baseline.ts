@@ -128,3 +128,33 @@ export function sessionTarget(session: SessionTarget, timezone: string, now: num
     createdAt: session.startedAt.getTime(), priority: 0,
   }
 }
+
+export interface PowerWindowRow {
+  dayOfWeek: DayOfWeek
+  onTime: string
+  offTime: string
+  endAction: 'turn_off' | 'maintain'
+}
+
+/**
+ * End of the scheduled power window that contains `now`, or null outside every
+ * window. A window runs from a row's latest on time to its off time (the next
+ * day when off is not after on); a `maintain` row never ends here because its
+ * off job leaves the side running. Wall-clock span, so a DST night is off by
+ * at most the hour the clocks moved.
+ */
+export function scheduledSessionEnd(rows: PowerWindowRow[], timezone: string, now: number): number | null {
+  let end: number | null = null
+  let zone: WeeklyZone | null = null
+  for (const row of rows) {
+    const [onH, onM] = row.onTime.split(':').map(Number)
+    const [offH, offM] = row.offTime.split(':').map(Number)
+    zone ??= weeklyZone(now, timezone)
+    const { startsAt } = weeklyWindow(zone, DAYS_OF_WEEK.indexOf(row.dayOfWeek), onH, onM, now)
+    if (!Number.isFinite(startsAt)) continue
+    const spanMin = ((offH * 60 + offM) - (onH * 60 + onM) + 1440) % 1440 || 1440
+    const rowEnd = row.endAction === 'maintain' ? Infinity : startsAt + spanMin * 60_000
+    if (now < rowEnd && (end === null || rowEnd > end)) end = rowEnd
+  }
+  return end
+}
