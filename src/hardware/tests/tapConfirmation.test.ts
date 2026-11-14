@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { HardwareClient } from '../client'
-import { CONFIRM_CLEAR_MARGIN_MS, CONFIRM_PULSE_PERIOD_MS, confirmationPulses, pulseTapConfirmation } from '../tapConfirmation'
+import { CONFIRM_CLEAR_MARGIN_MS, CONFIRM_START_DELAY_MS, CONFIRM_PULSE_PERIOD_MS, confirmationPulses, pulseTapConfirmation } from '../tapConfirmation'
 
 function setup(vibrating: boolean[] = [false, false]) {
   const calls: string[] = []
@@ -32,7 +32,7 @@ describe('tap confirmation pulses', () => {
     const s = setup()
     await pulseTapConfirmation('left', 2, s.deps)
     expect(s.client.setAlarm).toHaveBeenCalledWith('left', { vibrationIntensity: 100, vibrationPattern: 'double', duration: 10 })
-    expect(s.calls).toEqual(['start', `sleep ${2 * CONFIRM_PULSE_PERIOD_MS + CONFIRM_CLEAR_MARGIN_MS}`, 'clear'])
+    expect(s.calls).toEqual([`sleep ${CONFIRM_START_DELAY_MS}`, 'start', `sleep ${2 * CONFIRM_PULSE_PERIOD_MS + CONFIRM_CLEAR_MARGIN_MS}`, 'clear'])
     expect(s.client.clearAlarm).toHaveBeenCalledWith('left')
   })
 
@@ -42,10 +42,17 @@ describe('tap confirmation pulses', () => {
     expect(s.calls).toEqual([])
   })
 
-  it('leaves an alarm that started during the pulses ringing', async () => {
+  it('waits out the firmware\'s own tap buzz before starting', async () => {
     const s = setup([false, true])
+    await pulseTapConfirmation('left', 1, s.deps)
+    // An alarm that began during the wait is left alone.
+    expect(s.calls).toEqual([`sleep ${CONFIRM_START_DELAY_MS}`])
+  })
+
+  it('leaves an alarm that started during the pulses ringing', async () => {
+    const s = setup([false, false, true])
     await pulseTapConfirmation('right', 1, s.deps)
-    expect(s.calls).toEqual(['start', `sleep ${CONFIRM_PULSE_PERIOD_MS + CONFIRM_CLEAR_MARGIN_MS}`])
+    expect(s.calls).toEqual([`sleep ${CONFIRM_START_DELAY_MS}`, 'start', `sleep ${CONFIRM_PULSE_PERIOD_MS + CONFIRM_CLEAR_MARGIN_MS}`])
   })
 
   it('sends nothing for zero pulses', async () => {

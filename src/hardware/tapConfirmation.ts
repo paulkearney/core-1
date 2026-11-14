@@ -15,6 +15,12 @@ import type { Side } from './types'
  * wants (verified live on a Pod 5 cover, docs/hardware/alarms.md).
  */
 
+/**
+ * Wait after the tap before starting: the cover MCU drops an alarm that
+ * arrives while the firmware's own 250 ms tap buzz is still running (seen
+ * live: a start 140 ms after the tap never reached the motor).
+ */
+export const CONFIRM_START_DELAY_MS = 1000
 /** One `double` pattern cycle: 500 ms on, 500 ms off, starting 500 ms in. */
 export const CONFIRM_PULSE_PERIOD_MS = 1000
 /** Clear this far past the last pulse's cycle: after it ends, before the next starts at +500 ms. */
@@ -39,6 +45,8 @@ export async function pulseTapConfirmation(side: Side, pulses: number, deps: Tap
   if (pulses < 1) return
   // The firmware's clear stops both sides' vibration, so a confirmation never
   // runs while an alarm rings: it would silence the other side's alarm.
+  if (deps.alarmVibrating()) return
+  await deps.sleep(CONFIRM_START_DELAY_MS)
   if (deps.alarmVibrating()) return
   const client = deps.client()
   await client.connect()
