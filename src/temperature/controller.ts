@@ -143,14 +143,20 @@ export class TemperatureController {
     ], now)
   }
 
-  async setManual(side: Side, temperature: number, holdMs = DEFAULT_HOLD_MS, durationSec?: number): Promise<TemperatureControlStatus> {
+  async setManual(side: Side, temperature: number, holdMs?: number, durationSec?: number): Promise<TemperatureControlStatus> {
     return this.deps.withSideLock(side, () => this.setManualLocked(side, temperature, holdMs, durationSec))
   }
 
-  async setManualLocked(side: Side, temperature: number, holdMs = DEFAULT_HOLD_MS, durationSec?: number): Promise<TemperatureControlStatus> {
+  /**
+   * With no `holdMs`, a change made inside a scheduled power window holds
+   * until that window's off time (a tap or app change at night lasts the
+   * night), and DEFAULT_HOLD_MS otherwise.
+   */
+  async setManualLocked(side: Side, temperature: number, holdMs?: number, durationSec?: number): Promise<TemperatureControlStatus> {
     if (!Number.isFinite(temperature) || temperature < MIN_TEMP || temperature > MAX_TEMP) {
       throw new Error('Temperature outside hardware bounds')
     }
+    holdMs ??= this.defaultHoldMs(side)
     if (!Number.isInteger(holdMs) || holdMs <= 0 || holdMs > MAX_HOLD_MS) {
       throw new Error('Hold must be between 1 millisecond and 24 hours')
     }
@@ -306,6 +312,14 @@ export class TemperatureController {
     this.applied[side] = null
     this.appliedAt[side] = null
     this.appliedDeadline[side] = null
+  }
+
+  private defaultHoldMs(side: Side): number {
+    const now = this.deps.now()
+    const end = this.deps.readSessionEnd?.(side, now) ?? null
+    if (end === null || !Number.isFinite(end)) return DEFAULT_HOLD_MS
+    const untilEnd = Math.ceil(end - now)
+    return untilEnd > DEFAULT_HOLD_MS && untilEnd <= MAX_HOLD_MS ? untilEnd : DEFAULT_HOLD_MS
   }
 
   /**

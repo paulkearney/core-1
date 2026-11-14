@@ -43,6 +43,11 @@ interface GestureActionDeps {
   findDeviceState: (side: Side) => Promise<DeviceStateRow | null>
   newHardwareClient: (socketPath: string) => HardwareClient
   alarm: AlarmHooks
+  /**
+   * Buzz back that a temperature tap took effect (tapConfirmation.ts).
+   * Fire-and-forget: it outlasts the tap's handling by a few seconds.
+   */
+  confirmTap?: (side: Side, tapType: GestureEvent['tapType']) => void
 }
 
 /** Repeated after a snooze when the snoozed alarm's own settings are unknown. */
@@ -105,18 +110,19 @@ export class GestureActionHandler {
     if (!gesture) return
 
     if (gesture.actionType === 'temperature') {
-      await this.handleTemperatureAction(event, gesture)
+      if (await this.handleTemperatureAction(event, gesture)) this.deps.confirmTap?.(event.side, event.tapType)
     }
     else if (gesture.actionType === 'alarm') {
       await this.handleIdleAlarmAction(event, gesture)
     }
   }
 
+  /** True once the new target is applied. */
   private handleTemperatureAction = async (
     event: GestureEvent,
     gesture: TapGestureRow
-  ): Promise<void> => {
-    await withSideLock(event.side, async () => {
+  ): Promise<boolean> => {
+    return withSideLock(event.side, async () => {
       // Step from the temperature SleepyPod itself has set (the controller's
       // selected target), not the firmware's reported target: the firmware
       // applies its own tap adjustment (one Eight Sleep step, 2.75°F) before
@@ -128,14 +134,15 @@ export class GestureActionHandler {
         ?? (await this.deps.findDeviceState(event.side))?.targetTemperature
         ?? 75
       const amount = gesture.temperatureAmount ?? 0
-      if (!gesture.temperatureChange) return
+      if (!gesture.temperatureChange) return false
       const delta = gesture.temperatureChange === 'increment' ? amount : -amount
       const newTemp = Math.min(MAX_TEMP, Math.max(MIN_TEMP, currentTemp + delta))
       if (pumpStallShouldBlock(event.side)) {
         console.warn(`[gestureActionHandler] skipped setTemperature: pump stall guard blocks ${event.side}`)
-        return
+        return false
       }
       await getTemperatureController().setManualLocked(event.side, newTemp)
+      return true
     })
   }
 

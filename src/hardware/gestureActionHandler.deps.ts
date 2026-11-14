@@ -6,6 +6,18 @@ import type { GestureActionDeps } from './gestureActionHandler'
 import type { GestureEvent } from './dacMonitor'
 import { getSharedHardwareClient } from './dacMonitor.instance'
 import { getActiveAlarmConfig, markAlarmEnded } from './alarmState'
+import { confirmationPulses, pulseTapConfirmation } from './tapConfirmation'
+
+/** Either side's alarm vibrating; an unreadable state counts as vibrating. */
+function alarmVibrating(): boolean {
+  try {
+    return db.select({ v: deviceState.isAlarmVibrating }).from(deviceState).all().some(r => r.v)
+  }
+  catch (error) {
+    console.warn('[tapConfirmation] alarm state unreadable, skipping:', error instanceof Error ? error.message : error)
+    return true
+  }
+}
 
 /**
  * Production dependency implementations for GestureActionHandler.
@@ -34,6 +46,16 @@ export const defaultGestureActionDeps: GestureActionDeps = {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   newHardwareClient: (_socketPath: string) =>
     getSharedHardwareClient(),
+
+  confirmTap: (side, tapType) => {
+    pulseTapConfirmation(side, confirmationPulses(tapType), {
+      client: getSharedHardwareClient,
+      alarmVibrating,
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    }).catch((error: unknown) => {
+      console.error(`[tapConfirmation] ${side} failed:`, error instanceof Error ? error.message : error)
+    })
+  },
 
   // Lazy imports: snoozeManager → dacMonitor.instance → this module.
   alarm: {

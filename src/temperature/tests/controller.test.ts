@@ -396,3 +396,51 @@ describe('scheduled power window keeps the firmware timer alive', () => {
     expect(h.apply).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('a manual change inside a scheduled power window holds until its off time', () => {
+  // A tap or app change at 23:00 used to fall back to the schedule after
+  // 30 minutes; it now lasts until the night's scheduled off time.
+  function windowHarness(sessionEnd: number | null) {
+    const h = harness()
+    h.deps.readSessionEnd = () => sessionEnd
+    return { ...h, controller: new TemperatureController(h.deps) }
+  }
+  const NIGHT_MS = 2 * 3600_000 // inside the harness baseline's lifetime
+
+  it('holds until the window ends, then hands back to the schedule', async () => {
+    const h = windowHarness(1_000 + NIGHT_MS)
+    await h.controller.setManual('left', 90)
+    expect(h.holds.left?.expiresAt).toBe(1_000 + NIGHT_MS)
+    h.advance(DEFAULT_HOLD_MS)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenLastCalledWith('left', 90, undefined)
+    h.advance(NIGHT_MS - DEFAULT_HOLD_MS)
+    await h.controller.reconcile('left')
+    expect(h.apply).toHaveBeenLastCalledWith('left', 72)
+    expect(h.holds.left).toBeNull()
+  })
+
+  it('keeps the default hold outside a window', async () => {
+    const h = windowHarness(null)
+    await h.controller.setManual('left', 90)
+    expect(h.holds.left?.expiresAt).toBe(1_000 + DEFAULT_HOLD_MS)
+  })
+
+  it('never shortens below the default hold near the end of a window', async () => {
+    const h = windowHarness(1_000 + DEFAULT_HOLD_MS / 2)
+    await h.controller.setManual('left', 90)
+    expect(h.holds.left?.expiresAt).toBe(1_000 + DEFAULT_HOLD_MS)
+  })
+
+  it('keeps the default hold for a window with no end (maintain)', async () => {
+    const h = windowHarness(Infinity)
+    await h.controller.setManual('left', 90)
+    expect(h.holds.left?.expiresAt).toBe(1_000 + DEFAULT_HOLD_MS)
+  })
+
+  it('respects an explicit hold length', async () => {
+    const h = windowHarness(1_000 + NIGHT_MS)
+    await h.controller.setManual('left', 90, 60_000)
+    expect(h.holds.left?.expiresAt).toBe(61_000)
+  })
+})

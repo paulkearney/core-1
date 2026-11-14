@@ -122,6 +122,38 @@ describe('GestureActionHandler', () => {
       }
     })
 
+    test('confirms an applied temperature tap with its tap type', async () => {
+      const gesture = { actionType: 'temperature', temperatureChange: 'decrement', temperatureAmount: 2 }
+      const { deps } = makeDeps(gesture, { targetTemperature: 80 })
+      deps.confirmTap = vi.fn()
+
+      await new GestureActionHandler(SOCKET_PATH, deps).handle(makeEvent('left', 'doubleTap'))
+
+      expect(deps.confirmTap).toHaveBeenCalledWith('left', 'doubleTap')
+    })
+
+    test('does not confirm a tap the pump stall guard blocked', async () => {
+      pumpStallShouldBlock.mockReturnValueOnce(true)
+      const gesture = { actionType: 'temperature', temperatureChange: 'increment', temperatureAmount: 2 }
+      const { deps, client } = makeDeps(gesture, { targetTemperature: 80 })
+      deps.confirmTap = vi.fn()
+
+      await new GestureActionHandler(SOCKET_PATH, deps).handle(makeEvent('left', 'tripleTap'))
+
+      expect(client.setTemperature).not.toHaveBeenCalled()
+      expect(deps.confirmTap).not.toHaveBeenCalled()
+    })
+
+    test('does not confirm a tap whose temperature write failed', async () => {
+      const gesture = { actionType: 'temperature', temperatureChange: 'increment', temperatureAmount: 2 }
+      const { deps } = makeDeps(gesture, { targetTemperature: 80 }, makeMockClient({ setTemperature: vi.fn().mockRejectedValue(new Error('dac down')) }))
+      deps.confirmTap = vi.fn()
+
+      await new GestureActionHandler(SOCKET_PATH, deps).handle(makeEvent('left', 'tripleTap'))
+
+      expect(deps.confirmTap).not.toHaveBeenCalled()
+    })
+
     test('falls back to the reported target when SleepyPod has none for the side', async () => {
       const gesture = { actionType: 'temperature', temperatureChange: 'decrement', temperatureAmount: 3 }
       const { deps, client } = makeDeps(gesture, { targetTemperature: 73 })
